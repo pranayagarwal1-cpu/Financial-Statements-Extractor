@@ -1,0 +1,2 @@
+# This file ensures the output_excel directory is tracked by git
+# Generated Excel files will be placed here but won't be committed
