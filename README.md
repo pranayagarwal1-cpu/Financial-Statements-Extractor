@@ -1,42 +1,56 @@
 # Financial Statements Extractor 📊
 
-An intelligent AI agent that automatically extracts balance sheets from financial PDF documents using LangChain orchestration and Landing AI's Agentic Document Extraction (ADE).
+An AI-powered pipeline that extracts balance sheets from financial PDF documents using a two-agent architecture: an Extraction Agent that pulls structured data from PDFs and an Evaluation Agent that validates output quality.
 
 ## 🌟 Features
 
-- **Intelligent Page Detection**: Uses Claude AI to identify pages containing balance sheets
-- **High-Accuracy Extraction**: Leverages Landing AI's ADE for precise table extraction
-- **Structure Preservation**: Maintains hierarchical relationships and table structure
-- **Excel Export**: Saves extracted data to Excel with proper formatting
-- **Visual Debugging**: Generates annotated images showing detected chunks and bounding boxes
-- **Cost Optimization**: Sends only identified balance sheet pages to ADE (not entire documents)
-- **Automated Processing**: Batch processes multiple PDFs with minimal configuration
+- **Streamlit UI**: Upload PDFs, run extraction, and preview results in a browser
+- **Intelligent Page Detection**: Claude AI identifies which pages contain balance sheets
+- **High-Accuracy Extraction**: Landing AI ADE for precise table extraction with proper `colspan` handling
+- **Structure Preservation**: `pd.read_html()` parses HTML tables natively, preserving column headers
+- **Excel Export**: Saves extracted data to Excel in `output_excel/`
+- **Visual Debugging**: Annotated images showing ADE-detected chunk boundaries
+- **Cost Optimization**: Only balance sheet pages are sent to ADE (not entire documents)
+- **Two-Agent Collaboration**: Extraction and Evaluation agents collaborate via a JSON manifest handoff
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     LangChain Agent                         │
-│                   (Claude Sonnet 4.5)                       │
-└─────────────────────────────────────────────────────────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-        ▼                   ▼                   ▼
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│ PDF Analysis │   │ ADE Extract  │   │ Excel Export │
-│  (PyMuPDF)   │   │ (Landing AI) │   │  (Pandas)    │
-└──────────────┘   └──────────────┘   └──────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                        Streamlit UI (app.py)                       │
+│         Upload PDFs → Run Extraction → Review → Download          │
+└───────────────────────────────────────────────────────────────────┘
+                                │
+               ┌────────────────┴────────────────┐
+               ▼                                 ▼
+┌──────────────────────────┐       ┌──────────────────────────┐
+│   Extraction Agent       │  ───▶ │   Evaluation Agent       │
+│   (AI Agent.py)          │  JSON │   (Evaluation Agent.py)  │
+│   LangChain + Claude     │manifest LangChain + Claude       │
+└──────────────────────────┘       └──────────────────────────┘
+         │                                    │
+         ▼                                    ▼
+┌──────────────┐  ┌──────────────┐   ┌──────────────────────┐
+│ PDF Analysis │  │ ADE Extract  │   │  Quality Validation  │
+│  (PyMuPDF)   │  │ (Landing AI) │   │  (Accounting Eq.)    │
+└──────────────┘  └──────────────┘   └──────────────────────┘
 ```
 
-**Workflow**:
-1. Agent lists PDF files in input folder
-2. Extracts text from all pages using PyMuPDF
-3. LLM identifies pages containing balance sheets
-4. Extracts single-page PDFs for identified pages
-5. Sends each page to Landing AI ADE for table extraction
-6. Parses HTML tables to clean markdown format
-7. Saves to Excel with structural integrity
+**Extraction workflow**:
+1. Lists PDFs in `input_files/`
+2. Reads all pages with PyMuPDF; LLM identifies balance sheet pages
+3. Exports each balance sheet page as a single-page PDF to `intermediate_files/`
+4. Sends each page to Landing AI ADE; parses returned HTML with `pd.read_html()`
+5. Coalesces duplicate columns caused by `colspan` headers
+6. Saves to Excel in `output_excel/`
+7. Writes `output_excel/extraction_manifest.json` as handoff for the Evaluation Agent
+
+**Evaluation workflow**:
+1. Reads `extraction_manifest.json` to discover produced files
+2. Inspects each Excel file's structure
+3. Validates accounting equation (Assets = Liabilities + Equity, ±1% tolerance)
+4. Scores completeness and data quality
+5. Saves JSON + Markdown report to `output_excel/`
 
 ## 📋 Prerequisites
 
@@ -76,152 +90,131 @@ LANDINGAI_API_KEY=your_landingai_api_key_here
 
 ## 📖 Usage
 
-### Basic Usage
+### Option 1 — Streamlit UI (recommended)
 
-Place your PDF files in the project directory and run:
+```bash
+streamlit run app.py
+```
+
+- **Sidebar**: Upload PDF files (saved to `input_files/`) or manage existing ones
+- **Step 1**: Click **Run Extraction** to invoke the Extraction Agent
+- **Step 2**: Review extracted balance sheets inline; download Excel files
+
+### Option 2 — Sequential pipeline (CLI)
+
+Runs Extraction then Evaluation back-to-back:
+
+```bash
+python pipeline.py
+```
+
+### Option 3 — Extraction Agent only (CLI)
 
 ```bash
 python "AI Agent.py"
 ```
 
-The agent will:
-- Process all PDFs in the current folder
-- Identify balance sheet pages automatically
-- Extract tables and save to `output_excel/` folder
-- Save temporary PDFs and annotated images to `temp_ade_pages/` for inspection
-
-### Output Files
-
-```
-output_excel/
-├── Alliander-Half-Year-Report-2025_balance_sheet.xlsx
-└── [other extracted files]
-
-temp_ade_pages/
-├── Alliander-Half-Year-Report-2025_page22_for_ADE.pdf
-├── Alliander-Half-Year-Report-2025_page22_for_ADE_annotated.png
-└── [other temp files]
-```
-
-### Custom Configuration
-
-Edit constants in `AI Agent.py`:
-
-```python
-INPUT_FOLDER = "."                    # Folder containing PDFs
-OUTPUT_FOLDER = "output_excel"        # Excel output location
-TEMP_ADE_FOLDER = "temp_ade_pages"    # Temp files for inspection
-ADE_MODEL = "dpt-2-latest"            # Landing AI model
-```
-
-## 🛠️ Advanced Usage
-
-### Using ADE.py Directly
-
-For direct ADE processing without agent orchestration:
-
-```bash
-python ADE.py
-```
-
-### Custom Task
-
-Modify the task in `AI Agent.py` main block:
-
-```python
-task = """
-Process specific PDF: Alliander-Half-Year-Report-2025.pdf
-Extract balance sheet from pages 20-25 only.
-"""
-result = run_agent(task, max_iterations=20)
-```
-
-## 📊 Features in Detail
-
-### HTML to Markdown Conversion
-- Intelligently handles `colspan` and `rowspan` attributes
-- Preserves header structure across multiple columns
-- Distinguishes between generic headers (€ million) and specific headers (dates)
-
-### Structural Integrity
-- **Multiline Cell Expansion**: Splits cells containing newlines into separate rows
-- **Text/Number Splitting**: Separates merged text and numerical values
-- **Header Detection**: Automatically identifies header rows
-- **Column Alignment**: Ensures values align with correct headers
-
-### Balance Sheet Validation
-- Verifies presence of Assets, Liabilities, and Equity sections
-- Validates against accounting rules (Assets = Liabilities + Equity)
-- Filters out non-balance sheet tables automatically
-
-## 🎯 Evaluation & KPIs
-
-See [EVALUATION_FRAMEWORK.md](EVALUATION_FRAMEWORK.md) for:
-- Key Performance Indicators (Accuracy, Completeness, Efficiency)
-- OKRs for production readiness
-- Benchmark targets and testing methodology
-- Quick start evaluation guide
-
-**Key Metrics**:
-- Field-Level Accuracy: Target ≥95%
-- Structural Accuracy: Target ≥90%
-- Balance Validation: Target 100%
-- Credit Efficiency: Target ≥85%
-
 ## 📁 Project Structure
 
 ```
 financial-statements-extractor/
-├── AI Agent.py              # Main LangChain orchestration agent
-├── ADE.py                   # Direct ADE processing script
-├── helper.py                # Utility functions
+├── AI Agent.py              # Extraction agent — LangChain + Landing AI ADE
+├── Evaluation Agent.py      # Evaluation agent — validates extracted Excel files
+├── pipeline.py              # Sequential orchestrator: Extraction → Evaluation
+├── app.py                   # Streamlit UI
 ├── requirements.txt         # Python dependencies
 ├── .env                     # API keys (not in git)
 ├── .env.example             # Template for API keys
 ├── README.md                # This file
-├── EVALUATION_FRAMEWORK.md  # KPIs and evaluation methodology
-├── output_excel/            # Extracted Excel files
-├── temp_ade_pages/          # Temporary PDFs and annotated images
+├── input_files/             # Place source PDFs here
+├── output_excel/            # Extracted Excel files + evaluation reports
+│   └── extraction_manifest.json   # Agent handoff file (auto-generated)
+├── intermediate_files/      # Single-page PDFs and annotated images (auto-generated)
 └── venv/                    # Virtual environment (not in git)
 ```
+
+### Key constants (in `AI Agent.py`)
+
+```python
+INPUT_FOLDER      = "input_files"       # Source PDFs
+OUTPUT_FOLDER     = "output_excel"      # Excel output
+INTERMEDIATE_FILES = "intermediate_files"  # Temp PDFs and debug images
+ADE_MODEL         = "dpt-2-latest"      # Landing AI model
+```
+
+## 🛠️ How Table Extraction Works
+
+ADE returns balance sheet tables as HTML. Date headers are often wrapped in `<td colspan="2">`, which causes duplicate column names when parsed naively.
+
+The pipeline uses `pd.read_html()` (which handles `colspan` natively) and then coalesces any remaining duplicate columns:
+
+```python
+dfs = pd.read_html(StringIO(table_content))
+df = dfs[0]
+# Merge duplicate columns (e.g. "30 June 2025" and "30 June 2025.1")
+coalesced = {}
+for col in df.columns:
+    base = re.sub(r'\.\d+$', '', str(col))
+    if base not in coalesced:
+        coalesced[base] = df[col].copy()
+    else:
+        coalesced[base] = coalesced[base].combine_first(df[col])
+df = pd.DataFrame(coalesced)
+```
+
+## 🤝 Agent Collaboration via Manifest
+
+After extraction completes, `write_extraction_manifest()` writes:
+
+```json
+{
+  "extraction_timestamp": "2026-03-27T...",
+  "excel_files": [
+    {
+      "excel_path": "output_excel/Report_balance_sheet.xlsx",
+      "source_pdf": "input_files/Report.pdf",
+      "pages": [22]
+    }
+  ]
+}
+```
+
+The Evaluation Agent reads this file as its starting point, so no paths are hard-coded between agents.
 
 ## 🔑 API Keys
 
 ### Anthropic API Key
 1. Sign up at [console.anthropic.com](https://console.anthropic.com/)
-2. Navigate to API Keys section
-3. Create new key and copy to `.env`
+2. Navigate to API Keys and create a new key
+3. Add to `.env` as `ANTHROPIC_API_KEY`
 
 ### Landing AI API Key
-1. Sign up at [landingai.com](https://landingai.com/)
-2. Access your account dashboard
-3. Generate API key for ADE access
-4. Copy to `.env`
+1. Sign up at [app.landing.ai](https://app.landing.ai/)
+2. Generate an ADE API key from your dashboard
+3. Add to `.env` as `LANDINGAI_API_KEY`
 
 ## 💡 Tips & Best Practices
 
 ### Cost Optimization
-- The agent only sends identified balance sheet pages to ADE (not entire documents)
-- Use page detection to minimize ADE credit usage
-- Check ADE credits before processing large batches
+- Only identified balance sheet pages are sent to ADE — not entire PDFs
+- The agent checks ADE credits before starting and warns if low
+- Use `intermediate_files/` to verify correct page identification before re-running
 
 ### Debugging
-- Review annotated PNG images in `temp_ade_pages/` to see what ADE detected
-- Inspect single-page PDFs to verify correct page identification
-- Check console output for detailed processing logs
+- Annotated PNGs in `intermediate_files/` show what ADE detected on each page
+- Single-page PDFs in `intermediate_files/` let you verify page selection
+- The Extraction log in the Streamlit UI captures full agent reasoning
 
 ### Common Issues
 
 **Issue**: No balance sheets detected
-- **Solution**: Check if PDF contains text-based tables (not scanned images)
-- Verify keywords like "Balance Sheet" or "Assets" appear in text
+- **Solution**: Confirm the PDF contains text-based tables (not scanned images); keywords like "Balance Sheet", "Assets", or "Liabilities" must appear in extracted text
 
 **Issue**: ADE credit exhaustion
-- **Solution**: Agent checks credits automatically - add more credits before processing
+- **Solution**: Add credits to your Landing AI account; the agent checks automatically before processing
 
-**Issue**: Incorrect table structure in Excel
-- **Solution**: Review annotated images to see if ADE detected correct boundaries
-- May need to adjust ADE model or page preprocessing
+**Issue**: Misaligned columns in Excel
+- **Solution**: Inspect annotated PNGs in `intermediate_files/` to verify ADE detected correct table boundaries
 
 ## 🤝 Contributing
 
@@ -234,7 +227,7 @@ Contributions welcome! Areas for improvement:
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
+MIT License — see LICENSE file for details.
 
 ## 🙏 Acknowledgments
 
@@ -243,14 +236,8 @@ MIT License - see LICENSE file for details
 - **Landing AI ADE**: High-accuracy document table extraction
 - **PyMuPDF**: PDF processing and manipulation
 - **Pandas**: Data structuring and Excel export
-
-## 📞 Support
-
-For issues, questions, or contributions:
-- Open an issue on GitHub
-- Review [EVALUATION_FRAMEWORK.md](EVALUATION_FRAMEWORK.md) for testing guidance
-- Check annotated images in `temp_ade_pages/` for debugging
+- **Streamlit**: UI framework
 
 ---
 
-**Status**: Active Development | **Version**: 1.0.0 | **Last Updated**: January 2026
+**Status**: Active Development | **Version**: 2.0.0 | **Last Updated**: March 2026

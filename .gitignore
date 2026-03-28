@@ -65,12 +65,18 @@ coverage.xml
 
 # Output folders (generated files)
 output_excel/*.xlsx
-temp_ade_pages/*.pdf
-temp_ade_pages/*.png
+output_excel/*.json
+output_excel/*.md
+intermediate_files/*.pdf
+intermediate_files/*.png
+
+# Input PDFs (user data, not committed)
+input_files/*.pdf
 
 # Keep the folders but not the contents
 !output_excel/.gitkeep
-!temp_ade_pages/.gitkeep
+!intermediate_files/.gitkeep
+!input_files/.gitkeep
 
 # Backup files
 *_backup_*.py
@@ -103,3 +109,4 @@ Desktop.ini
 output*.md
 !README.md
 !EVALUATION_FRAMEWORK.md
+!USAGE_EXAMPLES.md

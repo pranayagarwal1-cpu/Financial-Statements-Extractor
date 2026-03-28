@@ -15,9 +15,13 @@ Pillow>=10.0.0
 # Data Processing
 pandas>=2.0.0
 openpyxl>=3.1.0
+lxml>=4.9.0
 
-# HTML Parsing
+# HTML Parsing (used by ADE.py and legacy code)
 beautifulsoup4>=4.12.0
+
+# UI
+streamlit>=1.35.0
 
 # Environment Variables
 python-dotenv>=1.0.0

@@ -37,14 +37,15 @@ from landingai_ade.types import ParseResponse
 # CONFIGURATION
 # ============================================================================
 
-INPUT_FOLDER = "."  # Folder containing PDFs
+INPUT_FOLDER = "input_files"  # Folder containing PDFs
 OUTPUT_FOLDER = "output_excel"  # Folder to save Excel files
-TEMP_ADE_FOLDER = "temp_ade_pages"  # Folder to save temp PDFs for inspection
+INTERMEDIATE_FILES = "intermediate_files"  # Folder to save temp PDFs for inspection
 ADE_MODEL = "dpt-2-latest"  # Landing AI ADE model
 
-# Ensure output folders exist
+# Ensure folders exist
+os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-os.makedirs(TEMP_ADE_FOLDER, exist_ok=True)
+os.makedirs(INTERMEDIATE_FILES, exist_ok=True)
 
 # Define colors for chunk types (same as helper.py)
 CHUNK_TYPE_COLORS = {
@@ -508,7 +509,7 @@ def extract_balance_sheet_with_ade(pdf_filename: str, page_numbers: str) -> str:
                 # Save to visible temp folder for inspection (NOT deleting after processing)
                 base_name = Path(pdf_filename).stem
                 temp_pdf_filename = f"{base_name}_page{page_num}_for_ADE.pdf"
-                temp_pdf_path = os.path.join(TEMP_ADE_FOLDER, temp_pdf_filename)
+                temp_pdf_path = os.path.join(INTERMEDIATE_FILES, temp_pdf_filename)
 
                 single_page_doc.save(temp_pdf_path)
                 single_page_doc.close()
@@ -590,48 +591,52 @@ def extract_balance_sheet_with_ade(pdf_filename: str, page_numbers: str) -> str:
                                 # DEBUG: Show raw table content
                                 print(f"      🔍 Raw table content (first 500 chars): {table_content[:500]}")
 
-                                data = []
+                                # Parse HTML directly — pd.read_html handles colspan correctly
+                                try:
+                                    import re as _re
+                                    dfs = pd.read_html(StringIO(table_content))
+                                    if not dfs:
+                                        print(f"      ❌ pd.read_html returned no tables")
+                                        continue
 
-                                # ADE always returns tables as HTML - convert to clean markdown first
-                                if '<table' in table_content.lower():
-                                    print(f"      🔍 Converting HTML table to markdown format")
-                                    table_content = convert_html_table_to_markdown(table_content)
-                                    print(f"      🔍 Converted markdown (first 500 chars): {table_content[:500]}")
+                                    df = dfs[0]
 
-                                # Parse markdown table (pipe-separated format)
-                                print(f"      🔍 Parsing markdown table format")
-                                lines = table_content.strip().split('\n')
+                                    # Coalesce duplicate columns caused by colspan.
+                                    # pd.read_html suffixes repeated headers as "Header", "Header.1", etc.
+                                    # We merge them by taking the first non-NaN value per row.
+                                    coalesced = {}
+                                    order = []
+                                    for col in df.columns:
+                                        base = _re.sub(r'\.\d+$', '', str(col))
+                                        if base not in coalesced:
+                                            coalesced[base] = df[col].copy()
+                                            order.append(base)
+                                        else:
+                                            coalesced[base] = coalesced[base].combine_first(df[col])
 
-                                # Remove separator lines (e.g., |---|---|)
-                                lines = [line for line in lines if not (
-                                    line.strip().startswith('|') and
-                                    set(line.replace('|', '').replace('-', '').replace(':', '').strip()) == set()
-                                )]
+                                    df = pd.DataFrame({k: coalesced[k] for k in order})
 
-                                # Parse pipe-separated values
-                                for line in lines:
-                                    if '|' in line:
-                                        # Split by | and clean up
-                                        row = [cell.strip() for cell in line.split('|')]
-                                        # Remove empty first/last elements from split
-                                        row = [cell for cell in row if cell or cell == '0']
-                                        if row:  # Only add non-empty rows
-                                            data.append(row)
+                                    print(f"      🔍 Columns after coalescing: {list(df.columns)}")
+                                    print(f"      🔍 Shape: {df.shape}")
 
-                                print(f"      🔍 Final parsed data rows: {len(data)}")
+                                    # Serialise as list-of-lists (header row first) for JSON handoff
+                                    data = [list(df.columns)] + df.fillna('').astype(str).values.tolist()
 
-                                if data:
-                                    print(f"      🔍 First row: {data[0] if data else 'None'}")
-                                    print(f"      🔍 Last row: {data[-1] if len(data) > 0 else 'None'}")
+                                    print(f"      🔍 Final parsed data rows: {len(data)}")
+                                    print(f"      🔍 Header row: {data[0]}")
+                                    print(f"      🔍 Last row:   {data[-1]}")
 
-                                if data and len(data) > 1:
-                                    extracted_tables.append({
-                                        "page": page_num,  # Original page number
-                                        "data": data
-                                    })
-                                    print(f"      ✅ Extracted table with {len(data)} rows on page {page_num}")
-                                else:
-                                    print(f"      ❌ Failed to parse table data (data length: {len(data) if data else 0})")
+                                    if len(data) > 1:
+                                        extracted_tables.append({
+                                            "page": page_num,
+                                            "data": data
+                                        })
+                                        print(f"      ✅ Extracted table with {len(data)} rows on page {page_num}")
+                                    else:
+                                        print(f"      ❌ Table too small after parsing")
+
+                                except Exception as parse_err:
+                                    print(f"      ❌ pd.read_html failed: {parse_err}")
                             else:
                                 print(f"      ⏭️  Table doesn't match balance sheet criteria (Assets:{has_assets}, Liabilities:{has_liabilities}, Equity:{has_equity})")
 
@@ -861,6 +866,62 @@ def parse_and_save_to_excel(pdf_filename: str, extracted_data: str) -> str:
         })
 
 
+@tool
+def write_extraction_manifest() -> str:
+    """
+    Scans the output folders and writes a manifest JSON summarising everything
+    the extraction run produced.  This file is the handoff artifact that the
+    Evaluation Agent reads to know what to evaluate.
+
+    Returns:
+        JSON string with the manifest path and its contents.
+    """
+    import re
+    from datetime import datetime
+
+    try:
+        excel_files = glob.glob(os.path.join(OUTPUT_FOLDER, "*.xlsx"))
+        source_pdfs = glob.glob(os.path.join(INPUT_FOLDER, "*.pdf"))
+        temp_pdfs = glob.glob(os.path.join(INTERMEDIATE_FILES, "*.pdf"))
+
+        # Parse which pages were extracted from the temp PDF filenames
+        # Format: {base}_page{N}_for_ADE.pdf
+        pages_by_source: dict = {}
+        for temp_pdf in temp_pdfs:
+            name = os.path.basename(temp_pdf)
+            match = re.search(r"_page(\d+)_for_ADE", name)
+            if match:
+                page_num = int(match.group(1))
+                base = name[: name.rfind("_page")]
+                pages_by_source.setdefault(base, [])
+                if page_num not in pages_by_source[base]:
+                    pages_by_source[base].append(page_num)
+
+        manifest = {
+            "timestamp": datetime.now().isoformat(),
+            "input_folder": INPUT_FOLDER,
+            "output_folder": OUTPUT_FOLDER,
+            "temp_folder": INTERMEDIATE_FILES,
+            "source_pdfs": [os.path.basename(p) for p in source_pdfs],
+            "excel_outputs": [os.path.basename(e) for e in excel_files],
+            "pages_extracted": pages_by_source,
+        }
+
+        manifest_path = os.path.join(OUTPUT_FOLDER, "extraction_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        print(f"    📋 Manifest written to {manifest_path}")
+        return json.dumps({
+            "status": "success",
+            "manifest_path": manifest_path,
+            "manifest": manifest,
+        })
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 # ============================================================================
 # AGENT SETUP
 # ============================================================================
@@ -872,7 +933,8 @@ tools = [
     identify_balance_sheet_pages,
     check_ade_credits,
     extract_balance_sheet_with_ade,
-    parse_and_save_to_excel
+    parse_and_save_to_excel,
+    write_extraction_manifest,
 ]
 
 # Create LLM with function calling (using Claude)
@@ -920,8 +982,13 @@ Available tools:
 - check_ade_credits: CHECK THIS FIRST - Verify Landing AI ADE credits are available
 - extract_balance_sheet_with_ade: Extract tables using Landing AI ADE (one page at a time)
 - parse_and_save_to_excel: Save extracted data to Excel with proper formatting
+- write_extraction_manifest: CALL THIS LAST — writes the handoff JSON for the Evaluation Agent
 
-Work systematically through each PDF and provide a summary when complete."""
+Work systematically through each PDF and provide a summary when complete.
+
+FINAL STEP: After all PDFs have been processed and saved to Excel, ALWAYS call
+write_extraction_manifest() as the very last tool call.  This writes the handoff
+artifact that the Evaluation Agent needs to start its work."""
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -993,6 +1060,7 @@ if __name__ == "__main__":
     Please process all PDF files in the current folder and extract balance sheet data.
 
     For each PDF:
+    0. List PDF files in the input folder
     1. Check ADE credits first
     2. Identify which pages contain the balance sheet
     3. Extract each balance sheet page separately and send ONE PAGE AT A TIME to ADE
