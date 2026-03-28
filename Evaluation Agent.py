@@ -38,8 +38,8 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 INPUT_FOLDER = "input_files"
 OUTPUT_FOLDER = "output_excel"
 INTERMEDIATE_FILES = "intermediate_files"
-EVALUATION_FOLDER = "output_excel"
-MANIFEST_PATH = os.path.join(OUTPUT_FOLDER, "extraction_manifest.json")
+EVALUATION_FOLDER = "intermediate_files"
+MANIFEST_PATH = os.path.join(INTERMEDIATE_FILES, "extraction_manifest.json")
 
 # ============================================================================
 # EVALUATION TOOLS
@@ -55,7 +55,7 @@ def read_extraction_manifest(manifest_path: str = MANIFEST_PATH) -> str:
     If no manifest exists, falls back to discovering Excel files directly.
 
     Args:
-        manifest_path: Path to extraction_manifest.json (default: output_excel/extraction_manifest.json)
+        manifest_path: Path to extraction_manifest.json (default: intermediate_files/extraction_manifest.json)
 
     Returns:
         JSON string with manifest data, including excel_outputs and pages_extracted.
@@ -149,10 +149,9 @@ def validate_accounting_equation(excel_filename: str) -> str:
     """
     Validates the fundamental accounting equation:
         Total Assets = Total Liabilities + Total Equity
-    (or equivalently: Total Assets = Total Equity and Liabilities)
 
-    Searches the first column of each sheet for matching rows, extracts their
-    numeric values, and checks whether they balance within a 1 % tolerance.
+    Uses Claude as judge to identify the correct totals from the balance sheet,
+    avoiding brittle keyword matching that confuses subtotals with grand totals.
 
     Args:
         excel_filename: Filename (or full path) of the Excel file.
@@ -160,43 +159,6 @@ def validate_accounting_equation(excel_filename: str) -> str:
     Returns:
         JSON string with per-sheet validation results.
     """
-    ASSETS_KWS = ["total assets", "total asset"]
-    LIAB_EQUITY_KWS = [
-        "total liabilities and equity",
-        "total equity and liabilities",
-        "total liabilities, equity",
-        "total liabilities and shareholders",
-        "total liabilities and stockholders",
-        "total liabilities",
-    ]
-    EQUITY_KWS = [
-        "total equity",
-        "total shareholders' equity",
-        "total stockholders' equity",
-        "shareholders' equity",
-        "stockholders' equity",
-        "net assets",
-    ]
-
-    def parse_number(val):
-        if pd.isna(val):
-            return None
-        s = re.sub(r"[€$£¥,\s]", "", str(val).strip())
-        if s.startswith("(") and s.endswith(")"):
-            s = "-" + s[1:-1]
-        try:
-            return float(s)
-        except ValueError:
-            return None
-
-    def first_numeric_in_rows(rows, data_cols):
-        for _, row in rows.iterrows():
-            for col in data_cols:
-                v = parse_number(row[col])
-                if v is not None and v != 0:
-                    return v, str(row.iloc[0])
-        return None, None
-
     try:
         excel_path = (
             excel_filename
@@ -208,6 +170,7 @@ def validate_accounting_equation(excel_filename: str) -> str:
 
         xl = pd.ExcelFile(excel_path)
         results = []
+        llm = ChatAnthropic(model="claude-sonnet-4-5-20250929", temperature=0)
 
         for sheet_name in xl.sheet_names:
             df = xl.parse(sheet_name)
@@ -215,38 +178,52 @@ def validate_accounting_equation(excel_filename: str) -> str:
                 results.append({"sheet": sheet_name, "status": "skipped", "reason": "too small"})
                 continue
 
-            first_col = df.iloc[:, 0].astype(str).str.lower().str.strip()
-            data_cols = df.columns[1:]
+            sheet_text = df.fillna("").astype(str).to_string(max_rows=100, max_cols=8)
 
-            assets_rows = df[first_col.str.contains("|".join(ASSETS_KWS), na=False)]
-            liab_rows = df[first_col.str.contains("|".join(LIAB_EQUITY_KWS), na=False)]
-            equity_rows = df[first_col.str.contains("|".join(EQUITY_KWS), na=False)]
+            prompt = f"""You are an accounting expert. Examine this balance sheet data and validate the accounting equation.
 
-            assets_val, assets_lbl = first_numeric_in_rows(assets_rows, data_cols)
-            liab_val, liab_lbl = first_numeric_in_rows(liab_rows, data_cols)
-            equity_val, equity_lbl = first_numeric_in_rows(equity_rows, data_cols)
+BALANCE SHEET DATA (sheet: {sheet_name}):
+{sheet_text}
 
-            if assets_val is not None and liab_val is not None:
-                diff = abs(assets_val - liab_val)
-                tol = abs(assets_val) * 0.01
+Find the GRAND TOTAL rows only (not subtotals like "Total Current Assets" or "Total Current Liabilities"):
+- Total Assets (the final sum of all assets)
+- Total Liabilities and Equity (or equivalent: the final balancing figure)
+
+For each reporting period/column found, check if Total Assets = Total Liabilities + Equity.
+
+Respond with ONLY a JSON object — no markdown, no commentary:
+{{
+    "periods_found": ["list of period labels, e.g. 2024, 2023"],
+    "total_assets": {{"label": "exact row label", "values": {{"2024": 99467, "2023": 100495}}}},
+    "total_liabilities_equity": {{"label": "exact row label", "values": {{"2024": 99467, "2023": 100495}}}},
+    "equation_holds": true,
+    "differences": {{"2024": 0, "2023": 0}},
+    "verdict": "pass" | "fail" | "cannot_determine",
+    "notes": "brief explanation if equation does not hold or data is ambiguous"
+}}"""
+
+            response = llm.invoke(prompt)
+            response_text = response.content.strip()
+
+            for fence in ("```json", "```"):
+                if fence in response_text:
+                    start = response_text.find(fence) + len(fence)
+                    end = response_text.find("```", start)
+                    response_text = response_text[start:end].strip()
+                    break
+
+            try:
+                verdict = json.loads(response_text)
                 results.append({
                     "sheet": sheet_name,
                     "status": "validated",
-                    "total_assets": {"value": assets_val, "label": assets_lbl},
-                    "total_liabilities_equity": {"value": liab_val, "label": liab_lbl},
-                    "total_equity": {"value": equity_val, "label": equity_lbl} if equity_val else None,
-                    "difference": round(diff, 2),
-                    "tolerance_used": round(tol, 2),
-                    "equation_holds": diff <= tol,
+                    **verdict,
                 })
-            else:
+            except json.JSONDecodeError:
                 results.append({
                     "sheet": sheet_name,
-                    "status": "cannot_validate",
-                    "assets_found": assets_val is not None,
-                    "liabilities_found": liab_val is not None,
-                    "equity_found": equity_val is not None,
-                    "reason": "Could not locate required row(s) in first column",
+                    "status": "parse_error",
+                    "raw_response": response_text,
                 })
 
         return json.dumps({"status": "success", "filename": excel_filename, "validation_results": results})
@@ -472,10 +449,10 @@ Respond with ONLY a JSON object — no markdown, no commentary:
 def save_evaluation_report(evaluation_json: str) -> str:
     """
     Saves the complete evaluation results as:
-      - output_excel/evaluation_report_<timestamp>.json
-      - output_excel/evaluation_report_<timestamp>.md
-      - output_excel/evaluation_report_latest.json  (overwritten each run)
-      - output_excel/evaluation_report_latest.md
+      - intermediate_files/evaluation_report_<timestamp>.json
+      - intermediate_files/evaluation_report_<timestamp>.md
+      - intermediate_files/evaluation_report_latest.json  (overwritten each run)
+      - intermediate_files/evaluation_report_latest.md
 
     Args:
         evaluation_json: JSON string with the full evaluation results dict.
@@ -529,13 +506,19 @@ def save_evaluation_report(evaluation_json: str) -> str:
                 ta = sr.get("total_assets")
                 tle = sr.get("total_liabilities_equity")
                 if ta:
-                    lines.append(f"- Total Assets: `{ta.get('value')}` ({ta.get('label')})")
+                    vals = ta.get("values") or {}
+                    val_str = ", ".join(f"{k}: {v}" for k, v in vals.items()) if vals else ta.get("value", "N/A")
+                    lines.append(f"- Total Assets: `{val_str}` ({ta.get('label', '')})")
                 if tle:
-                    lines.append(f"- Total Liabilities+Equity: `{tle.get('value')}` ({tle.get('label')})")
-                if sr.get("difference") is not None:
-                    lines.append(f"- Difference: `{sr.get('difference')}` (tolerance: `{sr.get('tolerance_used')}`)")
-                if sr.get("reason"):
-                    lines.append(f"- Note: {sr.get('reason')}")
+                    vals = tle.get("values") or {}
+                    val_str = ", ".join(f"{k}: {v}" for k, v in vals.items()) if vals else tle.get("value", "N/A")
+                    lines.append(f"- Total Liabilities+Equity: `{val_str}` ({tle.get('label', '')})")
+                diffs = sr.get("differences")
+                if diffs:
+                    diff_str = ", ".join(f"{k}: {v}" for k, v in diffs.items())
+                    lines.append(f"- Differences: `{diff_str}`")
+                if sr.get("notes"):
+                    lines.append(f"- Note: {sr.get('notes')}")
                 lines.append("")
 
             # Completeness & quality
@@ -641,7 +624,10 @@ Your job is to:
    - accounting_pass_rate (e.g. "1/1" or "100 %")
    - avg_completeness_pct (float)
    - avg_numeric_quality_pct (float)
-   - cross_reference_verdict (e.g. "pass", "partial", "fail")
+   - cross_reference_verdict (e.g. "pass", "partial", "fail", "unable_to_verify")
+   - final_verdict (MUST be exactly "pass" or "fail") — your overall judgement
+     weighing all checks. Use "pass" if accounting equation holds and data is
+     substantially complete, even if cross-reference could not run.
 4. Call save_evaluation_report with a JSON string containing:
    {
      "overall_summary": { ... },
@@ -732,10 +718,10 @@ if __name__ == "__main__":
     Evaluate the outputs produced by the Balance Sheet Extraction Agent.
 
     Steps:
-    1. Read the extraction manifest from output_excel/extraction_manifest.json.
+    1. Read the extraction manifest from intermediate_files/extraction_manifest.json.
     2. For each Excel file listed in the manifest, run all evaluation checks.
     3. Cross-reference each Excel against its source PDF pages.
-    4. Save a complete evaluation report to the output_excel/ folder.
+    4. Save a complete evaluation report to the intermediate_files/ folder.
     5. Print an overall verdict.
     """
 

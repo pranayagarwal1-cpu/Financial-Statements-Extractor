@@ -909,7 +909,7 @@ def write_extraction_manifest() -> str:
             "pages_extracted": pages_by_source,
         }
 
-        manifest_path = os.path.join(OUTPUT_FOLDER, "extraction_manifest.json")
+        manifest_path = os.path.join(INTERMEDIATE_FILES, "extraction_manifest.json")
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 

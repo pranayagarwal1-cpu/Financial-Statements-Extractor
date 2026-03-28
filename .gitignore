@@ -69,6 +69,8 @@ output_excel/*.json
 output_excel/*.md
 intermediate_files/*.pdf
 intermediate_files/*.png
+intermediate_files/*.json
+intermediate_files/*.md
 
 # Input PDFs (user data, not committed)
 input_files/*.pdf

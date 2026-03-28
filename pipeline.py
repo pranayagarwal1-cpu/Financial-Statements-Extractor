@@ -65,16 +65,16 @@ def main():
 
     # ── Step 2: Evaluation Agent ──────────────────────────────────────────────
     print("\n\n📊 Loading Evaluation Agent...")
-    #evaluation_agent = load_module(
-    #    "evaluation_agent",
-    #    os.path.join(base_dir, "Evaluation Agent.py"),
-    #)
+    evaluation_agent = load_module(
+        "evaluation_agent",
+        os.path.join(base_dir, "Evaluation Agent.py"),
+    )
 
     evaluation_task = """
     The Extraction Agent has just finished running.
 
     Evaluate every Excel file it produced:
-    1. Read the extraction manifest from output_excel/extraction_manifest.json
+    1. Read the extraction manifest from intermediate_files/extraction_manifest.json
        to discover which files were created and which PDF pages they came from.
     2. For each Excel file:
        - Inspect its structure.
@@ -86,9 +86,9 @@ def main():
     5. Print the final verdict.
     """
 
-    #evaluation_result = evaluation_agent.run_evaluation_agent(
-    #    evaluation_task, max_iterations=25
-    #)
+    evaluation_result = evaluation_agent.run_evaluation_agent(
+        evaluation_task, max_iterations=25
+    )
 
     # ── Final combined summary ────────────────────────────────────────────────
     print("\n" + "=" * 70)
@@ -97,7 +97,7 @@ def main():
     print("\nExtraction summary:")
     print(extraction_result.get("output", "No output")[:400])
     print("\nEvaluation verdict:")
-    #print(evaluation_result.get("output", "No output")[:400])
+    print(evaluation_result.get("output", "No output")[:400])
     print("\nReports saved to: output_excel/")
     print("=" * 70)
 

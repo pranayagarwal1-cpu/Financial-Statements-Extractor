@@ -6,6 +6,7 @@ Layout:
   Main     — Step 1: Extract  →  Step 2: Human review gate  →  Step 3: Evaluate + Report
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -48,8 +49,9 @@ st.markdown("""
 
 # ── Session state ─────────────────────────────────────────────────────────────
 DEFAULTS = {
-    "stage":          "upload",   # upload | extracted
+    "stage":          "upload",   # upload | extracted | evaluated
     "extraction_log": "",
+    "evaluation_log": "",
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -57,10 +59,11 @@ for k, v in DEFAULTS.items():
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def run_script(script_name: str):
+def run_script(script_name: str, args: list = None):
     """Run a script with the venv Python; return (combined output, success)."""
+    cmd = [PYTHON, script_name] + (args or [])
     result = subprocess.run(
-        [PYTHON, script_name],
+        cmd,
         capture_output=True,
         text=True,
         cwd=str(BASE_DIR),
@@ -188,7 +191,7 @@ else:
         st.session_state.evaluation_log = ""
 
         with st.spinner("Extraction Agent running… this may take a minute."):
-            log, ok = run_script("AI Agent.py")
+            log, ok = run_script("Orchestrator.py", ["extract"])
 
         st.session_state.extraction_log = log
         st.session_state.stage = "extracted" if ok else "upload"
@@ -240,3 +243,94 @@ if stage == "extracted":
             st.session_state.stage = "upload"
             st.session_state.extraction_log = ""
             st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — EVALUATION
+# ══════════════════════════════════════════════════════════════════════════════
+if stage in ("extracted", "evaluated"):
+    st.divider()
+    eval_pill_state = "done" if stage == "evaluated" else "active"
+    step_pill("Step 3 — Evaluate Extraction Quality (Optional)", eval_pill_state)
+    st.subheader("Evaluate Extraction Quality *(Optional)*")
+    st.caption("Runs LLM-as-a-judge to validate accounting equations, completeness, and cross-reference values against the source PDF.")
+    st.info("💡 **Human evaluation is strongly recommended.** AI evaluation results are for reference only and may not capture all nuances. Always verify extracted data against the source document before use.")
+
+    col_btn, col_status = st.columns([2, 5])
+
+    with col_btn:
+        run_eval = st.button(
+            "▶ Run Evaluation",
+            type="primary",
+            use_container_width=True,
+        )
+
+    with col_status:
+        if stage == "evaluated":
+            st.success("✅ Evaluation complete — download report below.")
+        pass
+
+    if run_eval:
+        with st.spinner("Evaluation Agent running… this may take a minute."):
+            log, ok = run_script("Orchestrator.py", ["evaluate"])
+
+        st.session_state.evaluation_log = log
+        if ok:
+            st.session_state.stage = "evaluated"
+        else:
+            st.error("Evaluation failed — check the log below.")
+        st.rerun()
+
+    if st.session_state.evaluation_log:
+        with st.expander("📋 Evaluation log", expanded=False):
+            st.code(st.session_state.evaluation_log, language="")
+
+    # Download buttons for report files
+    report_json = INTERMEDIATE / "evaluation_report_latest.json"
+    report_md   = INTERMEDIATE / "evaluation_report_latest.md"
+
+    if stage == "evaluated" and report_json.exists():
+        try:
+            report_data = json.loads(report_json.read_text())
+            overall = report_data.get("overall_summary", {})
+            xref_verdict = str(overall.get("cross_reference_verdict", "")).lower()
+            acct_rate    = overall.get("accounting_pass_rate", "")
+            completeness = overall.get("avg_completeness_pct", "")
+
+            final_verdict = str(overall.get("final_verdict", "")).lower()
+            is_pass = final_verdict == "pass"
+            verdict_label = "PASS" if is_pass else "FAIL"
+            verdict_icon  = "✓" if is_pass else "✗"
+            verdict_color = "green" if is_pass else "red"
+
+            st.markdown(
+                f"### **Final Verdict: "
+                f"<span style='color:{verdict_color}'>{verdict_label}</span> {verdict_icon}**",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"Accounting equation: **{acct_rate}** &nbsp;|&nbsp; "
+                f"Completeness: **{completeness}%** &nbsp;|&nbsp; "
+                f"Cross-reference: **{overall.get('cross_reference_verdict', 'N/A')}**"
+            )
+            st.divider()
+        except Exception:
+            pass
+
+    if stage == "evaluated" and (report_json.exists() or report_md.exists()):
+        st.markdown("**Download Evaluation Report:**")
+        dl1, dl2 = st.columns(2)
+        if report_json.exists():
+            dl1.download_button(
+                "⬇ JSON Report",
+                data=report_json.read_bytes(),
+                file_name="evaluation_report.json",
+                mime="application/json",
+            )
+        if report_md.exists():
+            dl2.download_button(
+                "⬇ Markdown Report",
+                data=report_md.read_bytes(),
+                file_name="evaluation_report.md",
+                mime="text/markdown",
+            )
