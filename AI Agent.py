@@ -188,7 +188,7 @@ def save_annotated_image(parse_result: ParseResponse, document_path: str, output
             img_width, img_height = img.size
 
             # Draw bounding boxes for all groundings
-            for gid, grounding in parse_result.grounding.items():
+            for gid, grounding in (parse_result.grounding or {}).items():
                 # Check if grounding belongs to page 0 (first page)
                 if grounding.page != 0:
                     continue
@@ -839,6 +839,8 @@ def parse_and_save_to_excel(pdf_filename: str, extracted_data: str) -> str:
                 df = split_merged_columns(df)
 
                 if len(df) > 0 and len(df.columns) > 0:
+                    df['Source Document'] = Path(pdf_filename).name
+                    df['Page Number'] = table_info.get('page', '')
                     sheet_name = f"Page{table_info.get('page', saved_count+1)}"
                     sheet_name = sheet_name[:31]
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -1061,20 +1063,21 @@ if __name__ == "__main__":
 
     For each PDF:
     0. List PDF files in the input folder
-    1. Check ADE credits first
-    2. Identify which pages contain the balance sheet
-    3. Extract each balance sheet page separately and send ONE PAGE AT A TIME to ADE
-    4. Save temporary single-page PDFs to temp_ade_pages folder for inspection
-    5. Save annotated images showing chunk boundaries alongside each temp PDF
-    6. Save the extracted data to Excel format in the output_excel folder
-    7. Ensure no data loss and maintain structural integrity
+    1. Check ADE credits first before reading pdf content from input_files/.
+    2. Identify which pages contain the balance sheet.
+    3. Extract each balance sheet page separately and send ONE PAGE AT A TIME to ADE.
+    4. Save temporary single-page PDFs to intermediate_files/ for inspection.
+    5. Save annotated images showing chunk boundaries alongside each temp PDF.
+    6. Save the extracted data to Excel in the output_excel/ folder.
+    7. Ensure no data loss and maintain structural integrity.
 
-    IMPORTANT: Keep the temporary PDF files and annotated images for inspection - do not delete them.
+    IMPORTANT: As your very last action, call write_extraction_manifest() to
+    create the handoff file for the Evaluation Agent.
 
-    Provide a summary when complete.
+    Provide a brief summary when complete.
     """
 
-    result = run_agent(task, max_iterations=20)
+    result = run_agent(task, max_iterations=25)
 
     print("\n" + "="*70)
     print("🎉 PROCESSING COMPLETE")
